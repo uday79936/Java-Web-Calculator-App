@@ -1,133 +1,106 @@
 pipeline {
-    agent { label 'SonarNode' } // Main build/test/analysis runs on Sonar node
+    agent any
 
     tools {
-        jdk 'JDK17'      // Matches JDK name in Jenkins Global Tool Configuration
-        maven 'Maven'    // Matches Maven name in Jenkins Global Tool Configuration
+        jdk 'JDK'
+        maven 'MAVEN'
     }
 
     environment {
-        SONARQUBE_SERVER = 'SonarQube'
-        JAVA_HOME = '/usr/lib/jvm/java-17-openjdk-amd64'
+        JAVA_HOME = tool name: 'JDK', type: 'jdk'
         PATH = "${JAVA_HOME}/bin:${env.PATH}"
-        NEXUS_URL = 'http://3.227.246.21:8081/repository/maven-releases/'
-        NEXUS_REPO_ID = 'maven-releases'
-        MVN_SETTINGS = '/home/jenkins/.m2/settings.xml'
+        // Define Docker image with build number to avoid conflicts
+        DOCKER_IMAGE = "udaysairam/java-webapp:${env.BUILD_NUMBER}"
+        MAVEN_SETTINGS = "temp-settings.xml"
     }
 
     stages {
 
-        /* === Stage 1: Checkout Code === */
         stage('Checkout Code') {
             steps {
-                echo '📦 Cloning source from GitHub...'
-                checkout([$class: 'GitSCM',
-                    branches: [[name: '*/main']],
-                    userRemoteConfigs: [[
-                        url: 'https://github.com/mrtechreddy/Java-Web-Calculator-App.git'
-                    ]]
-                ])
+                git branch: 'main', url: 'https://github.com/uday79936/Java-Web-Calculator-App.git'
             }
         }
 
-        /* === Stage 2: SonarQube Code Analysis === */
-        stage('SonarQube Code Analysis') {
+        stage('Build with Maven') {
             steps {
-                echo '🔍 Running SonarQube static analysis...'
-                withSonarQubeEnv("${SONARQUBE_SERVER}") {
-                    sh '''
-                        echo "JAVA_HOME=$JAVA_HOME"
-                        java -version
-                        mvn clean verify sonar:sonar -DskipTests --settings ${MVN_SETTINGS}
-                    '''
+                echo "Running Maven build..."
+                sh 'mvn clean verify -B'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                echo "Running SonarQube analysis..."
+                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    sh 'mvn sonar:sonar -B -Dsonar.projectKey=java-webapp-region -Dsonar.host.url=http://54.196.254.229:9000 -Dsonar.login=$SONAR_TOKEN'
                 }
             }
         }
 
-        /* === Stage 3: Build Artifact === */
-        stage('Build Artifact') {
+        stage('Deploy to Nexus') {
             steps {
-                echo '⚙️ Building the application WAR...'
-                sh '''
-                    mvn package -DskipTests --settings ${MVN_SETTINGS}
-                    echo "✅ Build complete. WAR files:"
-                    ls -lh target/*.war
-                '''
+                echo "Deploying artifact to Nexus..."
+                writeFile file: "${MAVEN_SETTINGS}", text: """
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+  <servers>
+    <server>
+      <id>maven-snapshots</id>
+      <username>admin</username>
+      <password>admin123</password>
+    </server>
+  </servers>
+</settings>
+"""
+                sh 'mvn deploy -B -s ${MAVEN_SETTINGS} -DaltDeploymentRepository=maven-snapshots::default::http://54.196.254.229:8081/repository/maven-snapshots/'
             }
         }
 
-        /* === Stage 4: Upload Artifact to Nexus (Auto Version Bump) === */
-        stage('Upload Artifact to Nexus') {
+        stage('Build Docker Image') {
             steps {
-                echo '⬆️ Uploading built artifact to Nexus repository...'
-                sh '''
-                    NEW_VERSION="0.0.${BUILD_NUMBER}"
-                    echo "🔢 Setting project version to ${NEW_VERSION}"
-                    mvn versions:set -DnewVersion=${NEW_VERSION} --settings ${MVN_SETTINGS}
-
-                    echo "🚀 Deploying version ${NEW_VERSION} to Nexus..."
-                    mvn deploy -DskipTests --settings ${MVN_SETTINGS}
-
-                    echo "✅ Artifact successfully uploaded as version ${NEW_VERSION}"
-                '''
+                echo "Building Docker image: ${DOCKER_IMAGE}"
+                sh """
+                    docker build -t ${DOCKER_IMAGE} .
+                """
             }
         }
 
-        /* === Stage 5: Deploy to Tomcat === */
+        stage('Push to Docker Hub') {
+            steps {
+                echo "Pushing Docker image to Docker Hub: ${DOCKER_IMAGE}"
+                withCredentials([usernamePassword(credentialsId: 'docker_hub', usernameVariable: 'DOCKER_HUB_USR', passwordVariable: 'DOCKER_HUB_PSW')]) {
+                    sh """
+                        echo \$DOCKER_HUB_PSW | docker login -u \$DOCKER_HUB_USR --password-stdin
+                        docker push ${DOCKER_IMAGE}
+                    """
+                }
+            }
+        }
+
         stage('Deploy to Tomcat') {
-            agent { label 'TomcatNode' } // Switch execution to Tomcat node
             steps {
-                echo '🚀 Deploying latest WAR from Nexus to Tomcat...'
-                withCredentials([
-                    usernamePassword(credentialsId: 'nexus-creds', usernameVariable: 'NEXUS_USR', passwordVariable: 'NEXUS_PSW'),
-                    usernamePassword(credentialsId: 'tomcat-manager', usernameVariable: 'TOMCAT_USR', passwordVariable: 'TOMCAT_PSW')
-                ]) {
-                    sh '''
-                        cd /tmp
-                        echo "🧹 Cleaning up old WARs..."
-                        rm -f *.war
-
-                        echo "📥 Fetching latest WAR metadata from Nexus..."
-                        DOWNLOAD_URL=$(curl -s -u ${NEXUS_USR}:${NEXUS_PSW} \
-                            "http://3.227.246.21:8081/service/rest/v1/search?repository=maven-releases&group=com.web.cal&name=webapp-add" \
-                            | grep -oP '"downloadUrl"\\s*:\\s*"\\K[^"]+\\.war' | grep -vE '\\.md5|\\.sha1' | tail -1)
-
-                        if [ -z "$DOWNLOAD_URL" ]; then
-                            echo "❌ No WAR found in Nexus via REST API. Check your repository or groupId/artifactId."
-                            exit 1
-                        fi
-
-                        echo "✅ Found WAR in Nexus:"
-                        echo "$DOWNLOAD_URL"
-
-                        echo "⬇️ Downloading artifact..."
-                        curl -u ${NEXUS_USR}:${NEXUS_PSW} -O $DOWNLOAD_URL
-
-                        WAR_FILE=$(basename $DOWNLOAD_URL)
-                        echo "📦 Downloaded WAR: $WAR_FILE"
-
-                        # Extract artifact name for Tomcat context (e.g., webapp-add)
-                        APP_NAME=$(echo ${WAR_FILE} | sed 's/-[0-9].*//')
-                        echo "🧩 Deploying as Tomcat context: /${APP_NAME}"
-
-                        echo "🚀 Deploying WAR to Tomcat at http://13.220.167.254:8080/manager/text ..."
-                        curl -u ${TOMCAT_USR}:${TOMCAT_PSW} --upload-file ${WAR_FILE} \
-                             "http://13.220.167.254:8080/manager/text/deploy?path=/${APP_NAME}&update=true"
-
-                        echo "✅ Deployment completed successfully for context /${APP_NAME}"
-                    '''
-                }
+                echo "Deploying Docker container for Tomcat..."
+                sh """
+                    docker stop TOMCAT || true
+                    docker rm TOMCAT || true
+                    docker run -d --name TOMCAT -p 8500:8080 ${DOCKER_IMAGE}
+                """
             }
         }
     }
 
-    /* === Stage 6: Post Actions === */
     post {
+        always {
+            echo "Pipeline finished."
+            sh 'rm -f ${MAVEN_SETTINGS}'
+        }
         success {
-            echo '🎉 CI/CD Pipeline completed successfully — Code analyzed, built, versioned, published to Nexus, and deployed to Tomcat!'
+            echo "Pipeline succeeded! All steps completed."
         }
         failure {
-            echo '❌ Pipeline failed. Please review Jenkins console logs for error details.'
+            echo "Pipeline failed! Check logs for details."
         }
     }
 }
