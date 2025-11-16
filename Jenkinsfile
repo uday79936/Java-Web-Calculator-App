@@ -54,7 +54,7 @@ pipeline {
   </servers>
 </settings>
 """
-                sh 'mvn deploy -B -s ${MAVEN_SETTINGS} -DaltDeploymentRepository=maven-snapshots::default::http://3.87.118.133:8081/repository/maven-releases/'
+                sh 'mvn deploy -B -s ${MAVEN_SETTINGS} -DaltDeploymentRepository=maven-releases::default::http://3.87.118.133:8081/repository/maven-releases/'
             }
         }
 
