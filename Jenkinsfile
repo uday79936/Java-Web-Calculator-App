@@ -47,14 +47,14 @@ pipeline {
           xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
   <servers>
     <server>
-      <id>maven-snapshots</id>
+      <id>maven-releases</id>
       <username>admin</username>
       <password>admin123</password>
     </server>
   </servers>
 </settings>
 """
-                sh 'mvn deploy -B -s ${MAVEN_SETTINGS} -DaltDeploymentRepository=maven-snapshots::default::http://54.196.254.229:8081/repository/maven-snapshots/'
+                sh 'mvn deploy -B -s ${MAVEN_SETTINGS} -DaltDeploymentRepository=maven-snapshots::default::http://3.87.118.133:8081/repository/maven-releases/'
             }
         }
 
